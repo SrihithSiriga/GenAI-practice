@@ -1,0 +1,357 @@
+================================================================================
+       SELECTIVE TOPIC MEMORY — A SMART MEMORY ARCHITECTURE FOR LLM CHATBOTS
+          Concept by Srihith Siriga | Documented February 2026
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT IS THIS?
+────────────────────────────────────────────────────────────────────────────────
+
+Most chatbots with memory do one of two things:
+  (a) Send the ENTIRE conversation history every turn → token cost explodes
+  (b) Send only the LAST N messages → old context is silently lost
+
+Selective Topic Memory is a third approach. Instead of storing raw messages,
+it stores the TOPICS discussed, and on every new question, it selectively
+injects only the topics that are RELEVANT to what is being asked right now.
+
+Unrelated past topics are kept in the store but never sent to the model
+unless they become relevant again. This keeps token usage low and context
+quality high.
+
+
+────────────────────────────────────────────────────────────────────────────────
+THE CORE IDEA — IN ONE PARAGRAPH
+────────────────────────────────────────────────────────────────────────────────
+
+After every exchange, extract the main topic and a short summary and store
+them in a Topic Store. Before processing every new question, run a relevance
+check: compare the new question against all stored topics. If a stored topic
+is relevant to the current question, inject its summary into the model's
+context. If none match, treat the question as a fresh topic and answer
+normally. Always add the current topic to the store, whether it matched
+something or not.
+
+
+────────────────────────────────────────────────────────────────────────────────
+STEP-BY-STEP WALKTHROUGH — THE TREES / CARS / ROOTS EXAMPLE
+────────────────────────────────────────────────────────────────────────────────
+
+QUERY 1: "Tell me about trees"
+  ┌─────────────────────────────────────────────────────┐
+  │ Topic Store (before): EMPTY                         │
+  │ Relevance check: nothing to match against           │
+  │ Action: treat as fresh query, answer directly       │
+  │ After answer: extract topic → store "trees"         │
+  │ Topic Store (after):                                │
+  │   "trees" → "Trees are perennial woody plants..."  │
+  └─────────────────────────────────────────────────────┘
+
+QUERY 2: "Tell me about plants"
+  ┌─────────────────────────────────────────────────────┐
+  │ Topic Store (before): [trees]                       │
+  │ Relevance check: "plants" vs "trees"                │
+  │   → Related? Loosely yes, but user is asking about  │
+  │     plants specifically, not trees → LOW match      │
+  │   → Threshold not met → treat as fresh query        │
+  │ After answer: extract topic → store "plants"        │
+  │ Topic Store (after):                                │
+  │   "trees"  → "Trees are perennial woody plants..."  │
+  │   "plants" → "Plants are multicellular organisms..."│
+  └─────────────────────────────────────────────────────┘
+
+QUERY 3: "Tell me about photosynthesis in both"
+  ┌─────────────────────────────────────────────────────┐
+  │ Topic Store (before): [trees, plants]               │
+  │ Relevance check: "photosynthesis in both"           │
+  │   → "both" flag + photosynthesis tied to biology    │
+  │   → "trees" → HIGH match (trees do photosynthesis)  │
+  │   → "plants" → HIGH match (plants do photosynthesis)│
+  │ Action: inject summaries of "trees" AND "plants"    │
+  │         into context alongside the question         │
+  │ Model answers using those two summaries as context  │
+  │ After answer: extract topic → store "photosynthesis"│
+  │ Topic Store (after):                                │
+  │   "trees"          → summary                        │
+  │   "plants"         → summary                        │
+  │   "photosynthesis" → summary (links trees + plants) │
+  └─────────────────────────────────────────────────────┘
+
+QUERY 4: "Tell me about cars"
+  ┌─────────────────────────────────────────────────────┐
+  │ Topic Store (before): [trees, plants, photosynthesis]│
+  │ Relevance check: "cars" vs all stored topics        │
+  │   → "trees"          → NO match                     │
+  │   → "plants"         → NO match                     │
+  │   → "photosynthesis" → NO match                     │
+  │ Action: NO context injected → fresh query answered  │
+  │ After answer: extract topic → store "cars"          │
+  │ Topic Store (after):                                │
+  │   "trees" / "plants" / "photosynthesis" / "cars"    │
+  └─────────────────────────────────────────────────────┘
+
+QUERY 5: "Tell me about roots"
+  ┌─────────────────────────────────────────────────────┐
+  │ Topic Store (before): [trees, plants, photosyn, cars]│
+  │ Relevance check: "roots" vs all stored topics       │
+  │   → "trees"          → HIGH match (roots are part   │
+  │                         of a tree's structure)      │
+  │   → "plants"         → HIGH match (roots absorb     │
+  │                         water for plants)           │
+  │   → "photosynthesis" → MEDIUM match (roots support  │
+  │                         the photosynthesis system)  │
+  │   → "cars"           → NO match                     │
+  │ Action: inject "trees", "plants", "photosynthesis"  │
+  │         summaries into context. Skip "cars."        │
+  │ Model answers "roots" with botanical context ✅     │
+  │ After answer: store "roots" with links to above     │
+  └─────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+THE ARCHITECTURE — COMPONENTS
+────────────────────────────────────────────────────────────────────────────────
+
+COMPONENT 1: THE TOPIC STORE
+  A dictionary (key-value store) where:
+    Key   = topic name (e.g., "trees", "photosynthesis")
+    Value = {
+        summary      : short 2-3 sentence summary of what was discussed,
+        keywords     : ["leaves", "bark", "roots", "deciduous", ...],
+        turn_number  : when in the conversation this was discussed,
+        linked_topics: other topics in the store this is related to
+    }
+
+  The store grows over the conversation but is never sent to the model
+  in full. Only selected entries are ever injected.
+
+COMPONENT 2: THE TOPIC EXTRACTOR
+  After every model response, a lightweight call extracts:
+    - The main topic of this exchange (1-3 words)
+    - A 2-sentence summary of what was discussed
+    - 5 keywords related to this topic
+
+  This can be done with a tiny model or even regex/NLP (no LLM needed).
+  Cost: very small — output is just ~30 tokens.
+
+COMPONENT 3: THE RELEVANCE MAPPER
+  Before every new question, compare the new query against every topic
+  in the store. This is the intelligence of the system.
+
+  Two approaches:
+    (a) KEYWORD MATCHING — check if any stored keywords appear in the
+        new question. Fast, zero cost, works for exact matches.
+        Limitation: "roots" won't match keyword "tree" without semantic
+        understanding.
+
+    (b) EMBEDDING SIMILARITY — convert the new question and each stored
+        topic summary into a vector embedding and compute cosine similarity.
+        "Roots" will correctly match "trees" and "plants" by meaning.
+        Cost: embedding is cheap (much cheaper than a chat completion).
+        This is the recommended approach.
+
+COMPONENT 4: THE CONTEXT INJECTOR
+  Takes the matched topics (above a relevance threshold) and formats
+  them into the model's context:
+
+    "Previously discussed topics relevant to your question:
+     - Trees: Trees are perennial woody plants with a central trunk...
+     - Plants: Plants are multicellular photosynthetic organisms...
+    Answer the user's question using this context if helpful."
+
+  Only matched topics are injected. "cars" is never injected when the
+  user asks about roots.
+
+
+────────────────────────────────────────────────────────────────────────────────
+HOW IT COMPARES TO OTHER MEMORY APPROACHES
+────────────────────────────────────────────────────────────────────────────────
+
++------------------------+----------+---------------+---------+------------------+
+| Approach               | Tokens   | Old Context   | Topic   | Handles Topic    |
+|                        | per turn | preserved?    | jumping | switch cleanly?  |
++------------------------+----------+---------------+---------+------------------+
+| Full history           | Grows ∞  | Yes, all of it| No      | No — all mixed   |
+| Sliding window (last N)| Fixed    | Only recent   | No      | Partially        |
+| Keyword memory (simple)| Tiny     | Keywords only | Yes     | Partially        |
+| Selective Topic Memory | Small    | Summaries     | YES ✅  | YES ✅           |
+| Vector RAG memory      | Controlled| Semantically | Yes     | Yes              |
++------------------------+----------+---------------+---------+------------------+
+
+Selective Topic Memory sits between simple keyword memory and full vector RAG.
+It is more intelligent than keywords (because it uses relevance mapping) and
+simpler to implement than a full vector database.
+
+
+────────────────────────────────────────────────────────────────────────────────
+THE ALGORITHM — PSEUDOCODE
+────────────────────────────────────────────────────────────────────────────────
+
+topic_store = {}   # empty at conversation start
+
+on_new_user_question(question):
+
+    # Step 1: Find relevant stored topics
+    relevant_topics = []
+    for topic, data in topic_store.items():
+        score = relevance_score(question, data)   # keyword or embedding
+        if score > RELEVANCE_THRESHOLD:
+            relevant_topics.append((topic, data, score))
+
+    # Sort by relevance score, take top 3 max (avoid context bloat)
+    relevant_topics = sorted(relevant_topics, by=score, top=3)
+
+    # Step 2: Build context from relevant topics
+    if relevant_topics:
+        context = format_as_context(relevant_topics)
+    else:
+        context = ""   # no prior context injected → fresh answer
+
+    # Step 3: Ask the model (with or without context)
+    answer = ask_model(question, context)
+
+    # Step 4: Extract topic from this turn and store it
+    topic, summary, keywords = extract_topic(question, answer)
+    topic_store[topic] = {
+        "summary": summary,
+        "keywords": keywords,
+        "turn": current_turn_number,
+        "linked": [t for t, _, _ in relevant_topics]
+    }
+
+    return answer
+
+
+────────────────────────────────────────────────────────────────────────────────
+KEY DESIGN DECISIONS
+────────────────────────────────────────────────────────────────────────────────
+
+1. RELEVANCE THRESHOLD
+   Too low → everything matches everything → injecting irrelevant context
+   Too high → nothing ever matches → no memory benefit
+   Recommended starting point: cosine similarity > 0.65 for embeddings,
+   or 2+ shared keywords for keyword matching.
+
+2. TOP-K CAP
+   Even if 5 stored topics are relevant, only inject the top 3 most
+   similar. Injecting too many topics bloats context back toward full
+   history. Quality over quantity.
+
+3. SUMMARIES NOT FULL ANSWERS
+   Store 2-3 sentence summaries, not the full model response.
+   A full response might be 500 tokens. A summary is 30–50 tokens.
+   When retrieved, the summary gives the model enough context to connect
+   ideas without sending the full original answer.
+
+4. TOPIC CLUSTERING OVER TIME
+   If "roots", "leaves", "bark", and "branches" are all discussed, they
+   should cluster under a parent topic "tree anatomy." The store can
+   optionally merge related topics to prevent fragmentation.
+
+5. TOPIC ISOLATION FOR UNRELATED QUERIES
+   "Cars" is stored but never disrupts the biology context. This is the
+   core value proposition — clean topic switching without contamination.
+
+6. RECENCY BIAS
+   All else being equal, prefer more recent topics in relevance ranking.
+   If "trees" was asked in turn 1 and "plants" in turn 20, and the new
+   question matches both equally, prefer "plants" as more recent context.
+
+
+────────────────────────────────────────────────────────────────────────────────
+TOKEN COST COMPARISON — WORKED EXAMPLE (10-TURN CONVERSATION)
+────────────────────────────────────────────────────────────────────────────────
+
+Scenario: 10-turn conversation covering biology (5 turns) and cars (5 turns).
+Each model response ≈ 300 tokens. Each topic summary ≈ 40 tokens.
+
+FULL HISTORY APPROACH (current approach):
+  Turn 1:  70 prompt tokens
+  Turn 2:  70 + 370 = 440
+  Turn 3:  70 + 810 = 880
+  ...
+  Turn 10: ~4,300 prompt tokens per call
+  TOTAL over 10 turns: ~22,000 tokens
+
+SELECTIVE TOPIC MEMORY APPROACH:
+  Topic store after turn 9: 9 topics × 40 tokens = 360 tokens total stored
+  On turn 10 (biology question): 2–3 relevant topics injected ≈ 80–120 tokens
+  Prompt size on turn 10:  70 (system) + 20 (user message) + 100 (topics) = 190 tokens
+  TOTAL over 10 turns: ~2,000–3,000 tokens
+
+  That is an 85%+ reduction in prompt tokens with NO loss of topic-relevant context.
+
+
+────────────────────────────────────────────────────────────────────────────────
+LIMITATIONS AND EDGE CASES
+────────────────────────────────────────────────────────────────────────────────
+
+1. WITHIN-TURN PRONOUN RESOLUTION
+   "Tell me about its roots" — the "its" still needs to be resolved
+   to a specific topic before relevance matching can work.
+   Solution: combine with a lightweight pronoun resolver (as already done
+   in wiki_chatbot_memory.py with resolve_topic()).
+
+2. TOPIC EXTRACTION ACCURACY
+   If the extraction step produces a bad topic label, the store degrades.
+   "Tell me about Mars" should store "Mars (planet)" not "Mars (chocolate)".
+   A disambiguation step helps here.
+
+3. GRADUAL TOPIC DRIFT
+   A conversation about trees that slowly drifts to climate science to
+   economics might not have clean topic boundaries. Fuzzy topics are
+   harder to store cleanly than discrete ones.
+
+4. MULTI-TOPIC QUESTIONS
+   "Compare the roots of trees to the transmission of cars" — this spans
+   two stored topics from completely different domains. The system should
+   inject BOTH "trees" and "cars" context here, even though they're
+   unrelated to each other.
+
+5. COLD START
+   For the first 2–3 turns, the store is sparse. The system behaves like
+   a memoryless chatbot until enough topics are accumulated. This is
+   acceptable and expected.
+
+
+────────────────────────────────────────────────────────────────────────────────
+WHY THIS IS A GOOD IDEA
+────────────────────────────────────────────────────────────────────────────────
+
+Most LLM memory systems treat memory as a FIFO queue (first-in-first-out)
+or a sliding window. They are "time-aware" but "topic-blind."
+
+Selective Topic Memory is "topic-aware" and "relevance-driven." It mirrors
+how human memory actually works — you don't recall every conversation you've
+ever had on any question. You recall the things that are RELEVANT to what
+you're thinking about right now. Unrelated memories stay dormant.
+
+This reduces:
+  - Token consumption (only relevant context sent)
+  - Context confusion (unrelated topics don't pollute the answer)
+  - "Memory hallucination" (model mixing up cars and trees)
+
+And improves:
+  - Long-conversation coherence (biology stays biological)
+  - Topic switching clarity (cars and trees never interfere)
+  - Scalability (you can have 1,000-turn conversations, store grows linearly,
+    but per-turn context stays small and relevant)
+
+
+================================================================================
+CONCEPT SUMMARY
+================================================================================
+
+  Name:       Selective Topic Memory
+  Type:       Chatbot memory architecture
+  Core idea:  Store topics, not messages. Retrieve by relevance, not recency.
+  Token cost: ~80–120 tokens per turn (vs growing ∞ with full history)
+  Best for:   Long conversations with multiple distinct topics
+  Key insight: Unrelated past topics should never appear in current context.
+
+================================================================================
+END OF DOCUMENT
+Concept originated by Srihith Siriga, February 2026.
+This is an original architectural idea for LLM chatbot memory management.
+================================================================================

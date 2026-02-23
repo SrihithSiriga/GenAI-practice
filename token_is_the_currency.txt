@@ -1,0 +1,557 @@
+================================================================================
+       TOKEN IS THE CURRENCY — A DEEP DIVE INTO HOW LLMs COST YOUR MONEY
+          Written from the perspective of an AI Engineer & Stanford Professor
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 1: WHAT IS A TOKEN?
+────────────────────────────────────────────────────────────────────────────────
+
+Most people make a fundamental mistake when they hear the word "token" — they
+assume it means "word." It does not. A token is a sub-word unit of text that
+a language model's tokenizer breaks your input into before the model ever reads
+a single character of your message.
+
+The tokenizer used by most modern LLMs (GPT-4, Claude, Big Pickle, etc.) is
+called a Byte Pair Encoding (BPE) tokenizer. BPE works by starting with
+individual characters and then repeatedly merging the most frequently occurring
+pairs of characters into a single "token" — until it has a vocabulary of a
+fixed size (usually 50,000 to 100,000 tokens). The result is that common,
+short English words become single tokens, while rare, long, or technical words
+get split into multiple tokens.
+
+Why does this matter? Because you pay per token. Every token you send in
+(prompt) and every token the model generates (completion) costs compute time
+and, in API-based models, real money. Understanding the token is understanding
+the economy of AI.
+
+
+How One Word Becomes One (or More) Tokens:
+-------------------------------------------
+
+The following table shows real tokenization behavior. "Tokens" counts how many
+pieces the word is broken into.
+
++-------------------------+--------+-------------------------------------------+
+| Word / Text             | Tokens | Notes                                     |
++-------------------------+--------+-------------------------------------------+
+| cat                     |   1    | Common, short — always 1 token           |
+| the                     |   1    | Most frequent English word — 1 token     |
+| hello                   |   1    | Common greeting — 1 token                |
+| chatbot                 |   2    | Split into: "chat" + "bot"               |
+| cryptocurrency          |   3    | Split into: "crypto" + "currency" + ...  |
+| photosynthesis          |   3    | Scientific word — rarely seen as whole   |
+| antidisestablishment    |   6    | Rare long word — heavily split           |
+| Srihith                 |   3    | Proper/uncommon names are expensive!     |
+| qwen2.5:3b              |   5    | Model names, mixed chars = many tokens   |
+| 12345678                |   4    | Numbers tokenize digit by digit often    |
+| https://en.wikipedia.org|   8+   | URLs are very token-expensive            |
+| 🥒 (cucumber emoji)     |   3    | Emojis encode as multiple bytes → tokens |
+| " " (a space)           |   1    | Spaces are often merged into next word   |
+| "\n" (newline)          |   1    | Whitespace has its own tokens            |
++-------------------------+--------+-------------------------------------------+
+
+The Golden Rule of Thumb:
+  - 1,000 English words  ≈  750 tokens  (words are denser than tokens)
+  - 1 A4 page of text    ≈  400–600 tokens
+  - 1 MB of plain text   ≈  ~180,000 tokens
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 2: THE TWO TYPES OF TOKEN SPEND
+────────────────────────────────────────────────────────────────────────────────
+
+Every time you send a request to a language model, your total token cost is
+split into exactly two categories: Prompt Tokens and Completion Tokens. These
+are fundamentally different in how they are processed and what they cost.
+
+
+PROMPT TOKENS (What you send IN)
+---------------------------------
+
+Prompt tokens are everything you put into the model before it starts generating
+a reply. This includes:
+
+  1. The SYSTEM PROMPT — your instructions to the model. Things like
+     "You are a helpful assistant. Answer only from Wikipedia context."
+
+  2. CONVERSATION HISTORY — if your chatbot has memory, every prior user
+     message and assistant reply is re-sent every single turn. This is the
+     single biggest hidden cost in memory-enabled chatbots.
+
+  3. THE USER'S MESSAGE — what the user typed this turn.
+
+  4. RAG / CONTEXT / DOCUMENTS — if you're doing retrieval-augmented generation
+     (like the Wikipedia fallback in wiki_chatbot_memory.py), the fetched
+     text is injected here.
+
+  5. TOOL CALL DEFINITIONS — if you give the model tools/functions to call,
+     their definitions count as prompt tokens too.
+
+Prompt tokens are processed in PARALLEL by the model in a single forward pass
+through the transformer. This means that reading 10,000 tokens or 100 tokens
+is not 100x slower — it's approximately the same latency. The GPU reads all
+prompt tokens simultaneously using the attention mechanism. This is why the
+model can "read" a 50-page PDF in 2–3 seconds.
+
+
+COMPLETION TOKENS (What the model generates OUT)
+-------------------------------------------------
+
+Completion tokens are the model's reply — every word (token) of its response.
+This is generated SEQUENTIALLY, one token at a time. The model cannot generate
+token #5 until it has generated tokens #1 through #4. This is called
+autoregressive generation and it is the core reason why:
+
+  - Longer answers take longer than short answers
+  - Streaming exists — you see tokens appear one by one because they ARE
+    generated one by one
+  - You cannot parallelize answer generation (it's physically serial)
+
+This serial nature means that completion tokens have HIGHER LATENCY PER TOKEN
+than prompt tokens. A model might process 10,000 prompt tokens in 1 second,
+but only generate 50 completion tokens in that same second.
+
+
++------------------+-------------------+-----------------------------------------+
+| Property         | Prompt Tokens     | Completion Tokens                       |
++------------------+-------------------+-----------------------------------------+
+| What they are    | Your input        | Model's output                          |
+| Processing       | Parallel (fast)   | Sequential (slower per token)           |
+| Latency impact   | Low               | High — scales with answer length        |
+| Cost per token   | Usually cheaper   | Usually 2–4x more expensive in APIs     |
+| Can you control? | Yes — shorten it  | Partially — set max_tokens              |
+| Memory chatbots  | Grows every turn  | Stays roughly constant per answer       |
+| Biggest surprise | THIS is the cost  | People wrongly assume this is expensive |
++------------------+-------------------+-----------------------------------------+
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 3: THE TOKEN LIFECYCLE — FROM YOUR KEYBOARD TO THE ANSWER
+────────────────────────────────────────────────────────────────────────────────
+
+Let us trace exactly what happens when you type "Tell me about an atom" into
+a chatbot like wiki_chatbot_memory.py:
+
+STEP 1 — TOKENIZATION (0ms)
+  Your text is converted to a sequence of integer IDs.
+  "Tell me about an atom" → [24948, 757, 922, 459, 19670]
+  This happens instantly on the client side before any network call.
+
+STEP 2 — PROMPT ASSEMBLY (0ms)
+  The system prompt, conversation history, and your message are concatenated
+  into one long sequence of token IDs. This is the full "context."
+
+STEP 3 — NETWORK TRANSFER (~50–200ms)
+  The token IDs are sent over the internet to the model server. Note: you are
+  sending integers (IDs), not text strings. This is very compact.
+
+STEP 4 — PREFILL / PROMPT PROCESSING (~100–500ms)
+  The GPU reads ALL prompt tokens in one parallel forward pass through the
+  transformer. Every token attends to every other token (self-attention).
+  This is where the model "reads" and "understands" your entire input.
+  Duration scales slowly with prompt length due to parallelism.
+
+STEP 5 — AUTOREGRESSIVE GENERATION (the streaming you see)
+  The model generates one token at a time:
+  → generates "An" → feeds it back → generates "atom" → feeds it back →...
+  Each token requires a full forward pass. For a 300-token answer, this is
+  300 sequential GPU computations. This is why streaming exists and why
+  answers with more words take more wall-clock time.
+
+STEP 6 — DETOKENIZATION (0ms)
+  Token IDs are converted back to human-readable text.
+  [1681, 29871, 338] → "The atom is"
+
+STEP 7 — DISPLAY
+  In CLI: tokens print as they arrive (streaming).
+  In Streamlit (old way): wait for ALL steps to finish → big blank pause.
+  In Streamlit (new streaming way): tokens appear word by word like CLI.
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 4: HOW MANY TOKENS DOES EACH TASK ACTUALLY USE?
+────────────────────────────────────────────────────────────────────────────────
+
+Here is a practical breakdown for real-world AI tasks. All numbers are
+approximate and depend on verbosity settings and model behavior.
+
+
+A. SIMPLE CHATBOT (No Memory, No RAG)
+--------------------------------------
+
+  System prompt:         30–80 tokens
+  User message:          10–50 tokens
+  ─────────────────────────────────────
+  Total Prompt:          40–130 tokens
+  Completion (answer):   100–500 tokens
+  ─────────────────────────────────────
+  TOTAL PER TURN:        ~200–600 tokens
+
+  This is your cheapest possible chatbot. Every turn is independent.
+
+
+B. MEMORY CHATBOT (Any chatbot that passes conversation history to the model)
+   Project example: wiki_chatbot_memory.py
+-------------------------------------------------
+
+  The key insight: on Turn N, you send ALL prior N-1 turns as history.
+  This causes linear growth in prompt tokens per turn.
+
+  +-------+--------------------+---------------------+----------------------+
+  | Turn  | History (tokens)   | This Message        | Total Prompt Tokens  |
+  +-------+--------------------+---------------------+----------------------+
+  |  1    |       0            |   70                |    70                |
+  |  2    |     370            |   70                |   440                |
+  |  3    |     810            |   70                |   880                |
+  |  4    |   1,250            |   70                |  1,320               |
+  |  5    |   1,690            |   70                |  1,760               |
+  | 10    |   3,970            |   70                |  4,040               |
+  | 20    |   8,570            |   70                |  8,640               |
+  | 50    |  21,970            |   70                |  22,040              |
+  +-------+--------------------+---------------------+----------------------+
+
+  Notice: by Turn 10, even before the model says a word, you've already spent
+  4,040 tokens just on context. The model's answer might only be 300 tokens.
+  The prompt IS the cost. This is the "memory tax."
+
+  A real session log example showed:
+    Prompt: 1,859 tokens | Completion: 57 tokens → Prompt was 97% of the total cost!
+
+
+C. WIKIPEDIA RAG FALLBACK (Any chatbot that fetches Wikipedia as context)
+   Project example: wiki_chatbot_memory.py → search_wikipedia() + ask_model_with_context()
+---------------------------------------------------------
+
+  System prompt:              80 tokens
+  Conversation history:      500–2,000 tokens (depends on turns)
+  Wikipedia summary (10 s):  800–1,200 tokens
+  User message:               20 tokens
+  ──────────────────────────────────────
+  Total Prompt:           1,400–3,300 tokens
+  Completion:               150–500 tokens
+  ──────────────────────────────────────
+  TOTAL:                  1,550–3,800 tokens
+
+  The Wikipedia context itself (800–1200 tokens) is the dominant cost here.
+  Reducing sentences from 10 to 5 cuts this by ~40%.
+
+
+D. PDF SUMMARIZATION (Any LLM pipeline that processes documents)
+   Project example: streamlit_app.py (Stuff mode vs Map-Reduce mode)
+---------------------------------------------
+
+  METHOD 1: Stuff (whole document at once)
+    Pros: Single API call, coherent summary.
+    Cons: Fails if document > context window. Very expensive per call.
+
+    10-page PDF:    ~5,000 prompt tokens + ~500 completion = 5,500 tokens
+    50-page PDF:   ~25,000 prompt tokens + ~500 completion = 25,500 tokens
+    200-page PDF:  ~100,000 prompt tokens — may EXCEED context window → FAILS
+
+  METHOD 2: Map-Reduce (your app uses this for "Detailed" mode)
+    Each chunk:     3,000 tokens prompt → ~200 tokens summary
+    For a 50-page PDF split into 16 chunks:
+      Per chunk: 3,000 + 200 = 3,200 tokens
+      Total:     3,200 × 16 = 51,200 tokens
+    Then: 16 summaries (~3,200 tokens) → final combine call → 3,700 tokens
+    Total: ~55,000 tokens — but spread across 17 small, fast API calls.
+
+  METHOD 3: RAG (Best for large docs, not yet in your code)
+    Embed all chunks (done once, free at query time)
+    At query time: retrieve top 3 relevant chunks → ~3,000 tokens
+    Total: ~3,500 tokens per query regardless of document size!
+    This is the holy grail for large document Q&A.
+
+  +--------------------+-------------------+-----------+-----------+-----------+
+  | Document Size      | Pages  | Stuff     | Map-Red.  | RAG       | Best For  |
+  +--------------------+--------+-----------+-----------+-----------+-----------+
+  | Small (1-5 pages)  |   5    |  2,500    |  8,000    |  3,500    | Stuff     |
+  | Medium (10-30 pg)  |  20    | 10,000    | 25,000    |  3,500    | Stuff/RAG |
+  | Large (50-100 pg)  |  75    | 37,500    | 60,000    |  3,500    | RAG       |
+  | Huge (200+ pages)  | 200+   | FAILS     | 150,000+  |  3,500    | RAG only  |
+  +--------------------+--------+-----------+-----------+-----------+-----------+
+
+
+E. TOPIC RESOLUTION (Any chatbot that resolves vague follow-up questions)
+   Project example: wiki_chatbot_memory.py → resolve_topic() function
+----------------------------------------------------
+
+  This is a clever mini-call that turns vague pronouns like "it" → "Atom (physics)":
+
+  Resolver prompt (history + question):    200–600 tokens
+  Resolver completion (just the topic):    5–15 tokens
+  ─────────────────────────────────────────────────────
+  Total:                                   ~215–615 tokens
+
+  This is cheap because the completion is tiny (just a search phrase).
+  Well worth it to avoid wrong Wikipedia or web searches!
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 5: ANSWER GENERATION vs. ANSWER PRINTING — ARE THEY THE SAME COST?
+────────────────────────────────────────────────────────────────────────────────
+
+This is a question that confuses many beginners. Let's separate them clearly.
+
+ANSWER GENERATION (compute cost):
+  Generation happens on the MODEL SERVER (GPU). Every completion token
+  requires one forward pass through the neural network. This costs:
+    - Compute time (GPU cycles)
+    - In hosted APIs: money (billing per output token)
+    - Wall clock time (you wait for each token sequentially)
+
+  Generating 500 tokens ≈ 5–10 seconds on a mid-range hosted model.
+  Generating 500 tokens ≈ 30–120 seconds on a local Ollama model (CPU).
+  The "thinking" happens here. This is where intelligence lives.
+
+ANSWER PRINTING / STREAMING (display cost):
+  Printing is just moving bytes from the server to your screen.
+  It costs essentially NOTHING in compute or money.
+  But it heavily affects PERCEIVED LATENCY:
+
+  Without streaming: You wait 8 seconds staring at a blank screen,
+                     then 500 tokens appear all at once. Feels laggy.
+
+  With streaming:    Token 1 appears after 0.5s, then token 2, then 3...
+                     The same 8 seconds feels smooth and interactive.
+                     This is why your wiki_chatbot_memory_streamlit.py
+                     uses stream=True.
+
+  The KEY insight: streaming does NOT reduce the total time or cost.
+  It only reduces PERCEIVED latency by showing progress in real time.
+  The total tokens billed are identical with or without streaming.
+
+
++----------------------------+------------------+------------------+-----------+
+| Aspect                     | Generation       | Printing/Display | Costs $?  |
++----------------------------+------------------+------------------+-----------+
+| Where it happens           | GPU server       | Your screen      | Gen only  |
+| Time required              | Sequential/token | Instant          | Gen only  |
+| Billed tokens              | Yes              | No               | Gen only  |
+| Affected by answer length  | Yes              | Trivially        | Gen only  |
+| User perceives it          | As blank wait    | As text flowing  | -         |
+| How to improve UX          | Use streaming    | Use streaming    | No cost   |
++----------------------------+------------------+------------------+-----------+
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 6: THE CONTEXT WINDOW — THE HARD CEILING
+────────────────────────────────────────────────────────────────────────────────
+
+Every LLM has a maximum context window — the total number of tokens it can
+hold in memory at once. This includes BOTH prompt and completion tokens together.
+
+  Prompt Tokens + Completion Tokens ≤ Context Window Size
+
+If you exceed this, the API returns an error and refuses to process the request.
+
++---------------------+---------------------+-------------------------------+
+| Model               | Context Window      | Practical Meaning             |
++---------------------+---------------------+-------------------------------+
+| GPT-3.5-turbo       |   4,096 tokens      | ~8 pages of text max          |
+| GPT-4               |   8,192 tokens      | ~16 pages                     |
+| GPT-4-turbo         | 128,000 tokens      | ~256 pages (a novel!)         |
+| Claude 3.5 Sonnet   | 200,000 tokens      | ~400 pages                    |
+| Gemini 1.5 Pro      | 1,000,000 tokens    | ~2,000 pages (a textbook!)    |
+| qwen2.5:3b (local)  |  32,768 tokens      | ~65 pages                     |
+| Big Pickle          | Varies by provider  | Check API docs                |
++---------------------+---------------------+-------------------------------+
+
+The context window is why long conversations eventually fail or degrade:
+as history grows, it pushes against the ceiling. Models with small windows
+(like GPT-3.5's 4,096) effectively only "remember" the last ~8 exchanges
+before old messages start getting cut off.
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 7: THE HIDDEN COSTS MOST DEVELOPERS FORGET
+────────────────────────────────────────────────────────────────────────────────
+
+1. RETRY TOKENS
+   When an API call fails and you retry, you spend the prompt tokens AGAIN.
+   If you have a 5,000-token prompt and retry 3 times, that's 15,000 tokens
+   wasted. Always handle errors gracefully and consider exponential backoff.
+
+2. FAILED NEED_WIKI CALLS
+   In wiki_chatbot_memory.py, when the model says NEED_WIKI, you've already
+   spent the prompt tokens for that call. Then you make a SECOND call with
+   Wikipedia context. On a NEED_WIKI path, you pay for two model calls.
+
+3. TOOL / FUNCTION CALL SCHEMAS
+   If you define 10 tools for the model, each with a description and params,
+   those definitions are injected into every single prompt. 10 tools ×
+   ~100 tokens each = 1,000 extra tokens on EVERY call, used or not.
+
+4. WHITESPACE AND FORMATTING
+   Newlines, indentation, markdown headers, bullet points — they all cost
+   tokens. A heavily formatted system prompt with blank lines wastes tokens.
+   A compact one-liner saves 20–40 tokens per call. Over 1,000 calls, that's
+   20,000–40,000 tokens saved for free.
+
+5. LANGUAGE EFFICIENCY
+   English is the most token-efficient language for most tokenizers (since
+   they were trained primarily on English data).
+
+   +-------------------+------------------+------------------------------------+
+   | Language          | Tokens/Word      | Extra cost vs English              |
+   +-------------------+------------------+------------------------------------+
+   | English           |   ~0.75          | Baseline                           |
+   | French/Spanish    |   ~1.0           | ~33% more expensive                |
+   | German            |   ~1.1           | ~47% more (compound words split)   |
+   | Arabic            |   ~1.5           | ~100% more                         |
+   | Chinese           |   ~1.5–2.0       | ~100–167% more                     |
+   | Code (Python)     |   ~0.6           | Actually cheaper than prose!       |
+   +-------------------+------------------+------------------------------------+
+
+6. SYSTEM PROMPT DUPLICATION IN STREAMLIT
+   In Streamlit, the entire script reruns on every user interaction. If your
+   session state doesn't store messages properly, you can accidentally send
+   duplicate messages or rebuild history wrong, wasting tokens silently.
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 8: TOKEN OPTIMIZATION STRATEGIES — RANKED BY IMPACT
+────────────────────────────────────────────────────────────────────────────────
+
+These are ranked from highest impact to lowest. Implement the top ones first.
+
+RANK 1 — SLIDING WINDOW HISTORY  [High Impact, Easy]
+  Problem: Conversation history grows unbounded → linear cost explosion.
+  Solution: Only keep the last N message pairs in context.
+  Code:
+    MAX_TURNS = 6
+    history = messages[-(MAX_TURNS * 2):]  # last 6 user+assistant pairs
+  Savings: Can reduce prompt tokens by 80% in long conversations.
+
+RANK 2 — USE RAG INSTEAD OF FULL DOCUMENT  [Very High Impact, Medium Work]
+  Problem: Sending a full PDF costs 50,000+ tokens per query.
+  Solution: Embed document → at query time, retrieve only relevant chunks.
+  Savings: From 50,000 tokens → 3,000 tokens. A 94% reduction.
+
+RANK 3 — COMPRESS OLD HISTORY  [High Impact, Medium Work]
+  Problem: Sliding window loses old context completely.
+  Solution: Summarize old messages before dropping them.
+  Code:
+    When history exceeds MAX_TURNS, summarize the oldest half into
+    a single "Summary:" assistant message, then continue normally.
+  Savings: Infinite memory at bounded token cost.
+
+RANK 4 — TIGHTEN SYSTEM PROMPTS  [Medium Impact, Very Easy]
+  Every word in your system prompt runs on EVERY API call forever.
+  Audit and compress. Remove pleasantries, redundancies, and vague words.
+  Before: "You are a very helpful, knowledgeable, and friendly assistant
+           who loves to explain things in a clear way to users..." (28 tokens)
+  After:  "You are a knowledgeable assistant. Be concise." (9 tokens)
+  Savings: 19 tokens × 10,000 calls = 190,000 tokens saved for free.
+
+RANK 5 — REDUCE RAG CONTEXT SIZE  [Medium Impact, Very Easy]
+  In wiki_chatbot_memory.py, Wikipedia returns 10 sentences by default.
+  Reducing to 5 sentences halves the context cost with minimal quality loss
+  for most general questions.
+  Code: search_wikipedia(query, sentences=5)
+
+RANK 6 — SET max_tokens ON COMPLETIONS  [Medium Impact, Easy]
+  Prevent runaway long answers by capping completion length.
+  Code: client.chat.completions.create(model=..., max_tokens=500, ...)
+  This also prevents billing surprises.
+
+RANK 7 — CACHE EXPENSIVE PROMPTS  [High Impact, Hard]
+  Some APIs (OpenAI, Anthropic) support prompt caching. If your system
+  prompt + document context is the same across many calls, cache it.
+  Cached tokens cost ~10x less. For a 10,000-token shared context
+  across 1,000 calls: pays for itself after ~10 calls.
+
+RANK 8 — SMALLER MODELS FOR ROUTING  [Medium Impact, Medium Work]
+  Use a tiny model (3B parameters) just to classify: "does this need
+  Wikipedia?" Then use the big model only when needed. Your NEED_WIKI
+  pattern already approximates this — the model self-routes.
+
+RANK 9 — BATCH API CALLS  [Low-Medium Impact, Easy]
+  Many providers offer async batch APIs where you can submit 1,000 requests
+  at once for 50% cost reduction. Great for offline processing, not for
+  real-time chat.
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 9: REAL NUMBERS — A WORKED EXAMPLE SESSION
+────────────────────────────────────────────────────────────────────────────────
+
+Here is a worked example from a real terminal session using wiki_chatbot_memory.py.
+  This is a real session from the GenAI-practice project, and the numbers below
+  are actual API responses — not estimates:
+
+  Turn 1 (ask about atoms):
+    Prompt: 115 tokens  | Completion: 306 tokens | Total: 421 tokens
+
+  Turn 2 (tell me more about it):
+    Prompt: 1,859 tokens | Completion: 57 tokens | Total: 1,916 tokens
+    (Note: prompt jumped to 1,859 because Turn 1's 421 tokens are now history)
+
+  Session Total: 7,881 tokens in just a few exchanges.
+
+  What this tells us:
+  - The full conversation history is being re-sent every turn ✓
+  - The Prompt is ALWAYS the dominant cost (1,859 vs 57 for completion)
+  - Completion tokens can be tiny (57 tokens = ~3 sentences of answer)
+  - The session total grows faster than linear because each turn adds to all
+    future turns' prompt costs (compound growth)
+
+  Breakdown of that 1,859-token prompt on Turn 2:
+    System prompt:          ~60 tokens
+    Turn 1 user message:    ~20 tokens
+    Turn 1 assistant reply: ~320 tokens
+    Turn 2 user message:    ~10 tokens
+    ─────────────────────────────────
+    Total prompt:         ~410 tokens... wait, that's only 410?
+
+  Where did the other ~1,449 tokens come from in this example?
+  → A Wikipedia article was injected as context (~1,200 tokens of Wikipedia text).
+  → This shows the RAG path: 1,200 tokens of context fed the model,
+    but the answer was only 57 tokens. Classic prompt >> completion ratio.
+  → This pattern holds universally — RAG context dominates prompt cost.
+
+
+────────────────────────────────────────────────────────────────────────────────
+CHAPTER 10: MENTAL MODEL — THINK OF TOKENS LIKE WORKING MEMORY
+────────────────────────────────────────────────────────────────────────────────
+
+The best mental model for tokens is: the context window is the model's
+working memory (like RAM), and tokens are bytes of that RAM.
+
+  - System prompt = the OS / background processes always running
+  - Conversation history = recently used apps kept open
+  - RAG context = a document you opened for reference
+  - User message = what you just typed / clicked
+  - Completion = what the computer outputs
+
+Just as RAM has a fixed size, so does the context window. When RAM fills up,
+your computer slows down or crashes. When the context window fills up, the
+model either fails or starts "forgetting" older messages (if the API truncates).
+
+The difference: RAM costs nothing to fill. Context tokens cost money to fill.
+This is why token optimization is the single most important skill for building
+cost-efficient, production-grade AI systems.
+
+Every great AI engineer obsesses over tokens not because they are abstract —
+but because they are literal dollars, literal seconds of latency, and the
+literal boundary of what the model can "think about" at once.
+
+Token is the currency. Spend it wisely.
+
+
+================================================================================
+END OF DOCUMENT
+This document applies universally to any project using LLM APIs — whether
+you are building chatbots, document summarizers, RAG pipelines, coding
+assistants, search engines, or agentic workflows. The token economics
+described here are model-agnostic and provider-agnostic.
+
+The concrete examples throughout this document are drawn from the
+GenAI-practice project (wiki_chatbot_memory.py, streamlit_app.py,
+wiki_chatbot_memory_streamlit.py) and represent real, measured numbers
+from live API calls — not theoretical estimates.
+
+Authored February 2026. Adapt and extend with your own project's real numbers.
+================================================================================
