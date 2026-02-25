@@ -1,9 +1,16 @@
-import re
 import streamlit as st
-import wikipedia
-import ollama
 
-# ── Page config (must be first Streamlit call) ───────────────────────────────
+# ── Import all model logic from the main module ───────────────────────────────
+from local_wiki_chatbot import (
+    NEED_WIKI,
+    AVAILABLE_MODELS,
+    clean_query,
+    search_wikipedia,
+    ask_model_direct,
+    ask_model_with_context,
+)
+
+# ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
     page_title="Local Wiki Chatbot",
     page_icon="🤖",
@@ -137,89 +144,6 @@ hr { border-color: #1f1f1f !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-NEED_WIKI      = "NEED_WIKI"
-AVAILABLE_MODELS = ["qwen2.5:3b", "phi3:mini", "tinyllama:latest"]
-
-
-# ── Core logic (from local_wiki_chatbot.py) ───────────────────────────────────
-
-def clean_query(query: str) -> str:
-    prefixes = [
-        r"^tell me about\s+", r"^what is\s+", r"^what are\s+",
-        r"^who is\s+",        r"^who was\s+", r"^explain\s+",
-        r"^describe\s+",      r"^give me information (on|about)\s+",
-        r"^i want to know about\s+", r"^can you tell me about\s+",
-        r"^do you know about\s+",    r"^search for\s+", r"^look up\s+",
-    ]
-    cleaned = query.strip()
-    for pattern in prefixes:
-        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
-    return cleaned or query
-
-
-def search_wikipedia(query: str, sentences: int = 10):
-    try:
-        search_term = clean_query(query)
-        results = wikipedia.search(search_term, results=3)
-        if not results:
-            return None, "No Wikipedia results found."
-        page    = wikipedia.page(results[0], auto_suggest=False)
-        summary = wikipedia.summary(results[0], sentences=sentences, auto_suggest=False)
-        return page.title, summary
-    except wikipedia.exceptions.DisambiguationError as e:
-        try:
-            page    = wikipedia.page(e.options[0], auto_suggest=False)
-            summary = wikipedia.summary(e.options[0], sentences=sentences, auto_suggest=False)
-            return page.title, summary
-        except Exception:
-            return None, f"Ambiguous topic. Try: {', '.join(e.options[:4])}"
-    except wikipedia.exceptions.PageError:
-        return None, f"No Wikipedia page found for '{query}'."
-    except Exception as ex:
-        return None, f"Wikipedia error: {ex}"
-
-
-def ask_model_direct(user_query: str, model: str) -> str:
-    system_prompt = (
-        "You are a knowledgeable assistant. "
-        "Answer the user's question clearly and concisely using your own knowledge. "
-        "However, if you are NOT confident, or the topic is too specific, niche, or recent, "
-        "respond with ONLY the word: NEED_WIKI (nothing else). "
-        "Do NOT use NEED_WIKI if you genuinely know the answer."
-    )
-    response = ollama.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_query},
-        ]
-    )
-    return response["message"]["content"]
-
-
-def ask_model_with_context(user_query: str, wiki_title: str, wiki_context: str, model: str) -> str:
-    system_prompt = (
-        "You are a knowledgeable assistant. "
-        "You will be given a Wikipedia article as context. "
-        "Use ONLY that context to answer the user's question with a clear, concise summary. "
-        "Do not fabricate information beyond what the context provides."
-    )
-    user_message = (
-        f"Wikipedia article: '{wiki_title}'\n\n"
-        f"--- CONTEXT START ---\n{wiki_context}\n--- CONTEXT END ---\n\n"
-        f"User question: {user_query}\n\n"
-        f"Please provide a helpful and concise summary based on the context above."
-    )
-    response = ollama.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message},
-        ]
-    )
-    return response["message"]["content"]
-
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
@@ -317,8 +241,12 @@ if user_input:
 
                 if wiki_title is None:
                     status_placeholder.empty()
-                    reply_placeholder.markdown(f"⚠️ {wiki_context}\n\nSorry, I couldn't find enough information to answer that.")
-                    badge_placeholder.markdown('<span class="badge-none">📌 No source found</span>', unsafe_allow_html=True)
+                    reply_placeholder.markdown(
+                        f"⚠️ {wiki_context}\n\nSorry, I couldn't find enough information to answer that."
+                    )
+                    badge_placeholder.markdown(
+                        '<span class="badge-none">📌 No source found</span>', unsafe_allow_html=True
+                    )
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": f"⚠️ {wiki_context}\n\nSorry, I couldn't find enough information to answer that.",
@@ -361,6 +289,9 @@ if user_input:
             status_placeholder.empty()
             err_msg = f"❌ **Error:** {e}\n\nMake sure Ollama is running: `ollama serve`"
             reply_placeholder.markdown(err_msg)
+            badge_placeholder.markdown(
+                '<span class="badge-none">📌 Error</span>', unsafe_allow_html=True
+            )
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": err_msg,

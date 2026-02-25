@@ -2,12 +2,13 @@ import re
 import wikipedia
 import ollama
 
-# ── Model to use (local Ollama model) ───────────────────────────────────────
-MODEL_NAME = "qwen2.5:3b"
-NEED_WIKI  = "NEED_WIKI"
+# ── Model config ──────────────────────────────────────────────────────────────
+MODEL_NAME       = "qwen2.5:3b"
+NEED_WIKI        = "NEED_WIKI"
+AVAILABLE_MODELS = ["qwen2.5:3b", "phi3:mini", "tinyllama:latest"]
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def clean_query(query: str) -> str:
     """
@@ -67,10 +68,14 @@ def search_wikipedia(query: str, sentences: int = 10):
 
 # ── Model calls ───────────────────────────────────────────────────────────────
 
-def ask_model_direct(user_query: str) -> str:
+def ask_model_direct(user_query: str, model: str = MODEL_NAME) -> str:
     """
     Ask the local model to answer from its own knowledge.
     Returns NEED_WIKI if it's not confident.
+
+    Args:
+        user_query: The user's question.
+        model: Ollama model name to use (defaults to MODULE_NAME).
     """
     system_prompt = (
         "You are a knowledgeable assistant. "
@@ -81,18 +86,25 @@ def ask_model_direct(user_query: str) -> str:
     )
 
     response = ollama.chat(
-        model=MODEL_NAME,
+        model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_query}
+            {"role": "user",   "content": user_query},
         ]
     )
     return response["message"]["content"]
 
 
-def ask_model_with_context(user_query: str, wiki_title: str, wiki_context: str) -> str:
+def ask_model_with_context(user_query: str, wiki_title: str, wiki_context: str,
+                           model: str = MODEL_NAME) -> str:
     """
     Ask the local model to answer using Wikipedia context.
+
+    Args:
+        user_query: The user's question.
+        wiki_title: The Wikipedia article title.
+        wiki_context: The Wikipedia article summary text.
+        model: Ollama model name to use (defaults to MODEL_NAME).
     """
     system_prompt = (
         "You are a knowledgeable assistant. "
@@ -109,16 +121,16 @@ def ask_model_with_context(user_query: str, wiki_title: str, wiki_context: str) 
     )
 
     response = ollama.chat(
-        model=MODEL_NAME,
+        model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message}
+            {"role": "user",   "content": user_message},
         ]
     )
     return response["message"]["content"]
 
 
-# ── Chatbot loop ──────────────────────────────────────────────────────────────
+# ── Chatbot loop (console) ────────────────────────────────────────────────────
 
 def start_chatbot():
     print(f"🤖 Local Chatbot (powered by {MODEL_NAME} + Wikipedia fallback)")

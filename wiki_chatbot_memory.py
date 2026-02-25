@@ -17,10 +17,10 @@ client = OpenAI(
     base_url="https://opencode.ai/zen/v1"
 )
 
-MODEL      = "big-pickle"
-NEED_WIKI  = "NEED_WIKI"
+MODEL     = "big-pickle"
+NEED_WIKI = "NEED_WIKI"
 
-# ── Conversation memory ───────────────────────────────────────────────────────
+# ── Conversation memory (used by console chatbot) ─────────────────────────────
 # Each entry: {"role": "user"|"assistant", "content": "..."}
 conversation_history = []
 
@@ -50,21 +50,26 @@ def clean_query(query: str) -> str:
     return cleaned or query
 
 
-def resolve_topic(user_query: str) -> str:
+def resolve_topic(user_query: str, history: list = None) -> str:
     """
     Use the conversation history to resolve vague references like 'it', 'that',
     'the element', 'tell me more', etc. into a concrete Wikipedia search topic.
 
+    Args:
+        user_query: The user's latest message.
+        history: Optional list of {"role", "content"} dicts. Defaults to the
+                 module-level conversation_history if not provided.
+
     Returns the resolved topic string (e.g. 'Atom (physics)').
-    If the query is already self-contained, returns it as-is.
     """
-    if not conversation_history:
+    hist = history if history is not None else conversation_history
+
+    if not hist:
         return clean_query(user_query)
 
-    # Build a short history summary for the resolver prompt
     history_text = "\n".join(
-        f"{m['role'].capitalize()}: {m['content'][:300]}"   # truncate long messages
-        for m in conversation_history[-6:]  # last 3 turns (user+assistant each)
+        f"{m['role'].capitalize()}: {m['content'][:300]}"
+        for m in hist[-6:]
     )
 
     resolver_prompt = (
@@ -78,14 +83,11 @@ def resolve_topic(user_query: str) -> str:
         "Wikipedia search query:"
     )
 
-    raw = client.chat.completions.with_raw_response.create(
+    resp = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": resolver_prompt}],
     )
-    response = raw.parse()
-    resolved = response.choices[0].message.content.strip()
-    # Strip quotes if model wraps the result
-    resolved = resolved.strip('"\'')
+    resolved = resp.choices[0].message.content.strip().strip('"\'')
     return resolved if resolved else clean_query(user_query)
 
 
@@ -115,12 +117,19 @@ def search_wikipedia(search_term: str, sentences: int = 10):
         return None, f"Wikipedia search error: {ex}"
 
 
-def ask_model_direct() -> tuple:
+def ask_model_direct(history: list = None) -> tuple:
     """
-    Send the full conversation history to the model.
+    Send conversation history to the model.
     The system prompt tells it to reply NEED_WIKI if it's not confident.
+
+    Args:
+        history: Optional list of {"role", "content"} dicts. Defaults to the
+                 module-level conversation_history if not provided.
+
     Returns (reply_text, usage, headers).
     """
+    hist = history if history is not None else conversation_history
+
     system_prompt = (
         "You are a knowledgeable assistant with memory of the full conversation. "
         "Answer the user's latest question clearly and concisely using your own knowledge. "
@@ -130,7 +139,7 @@ def ask_model_direct() -> tuple:
         "(nothing else, no explanation). Do NOT use NEED_WIKI if you genuinely know the answer."
     )
 
-    messages = [{"role": "system", "content": system_prompt}] + conversation_history
+    messages = [{"role": "system", "content": system_prompt}] + hist
 
     raw = client.chat.completions.with_raw_response.create(
         model=MODEL,
@@ -140,11 +149,20 @@ def ask_model_direct() -> tuple:
     return response.choices[0].message.content, response.usage, raw.headers
 
 
-def ask_model_with_context(wiki_title: str, wiki_context: str) -> tuple:
+def ask_model_with_context(wiki_title: str, wiki_context: str, history: list = None) -> tuple:
     """
     Send conversation history PLUS Wikipedia context to the model.
+
+    Args:
+        wiki_title: The Wikipedia article title.
+        wiki_context: The Wikipedia article summary text.
+        history: Optional list of {"role", "content"} dicts. Defaults to the
+                 module-level conversation_history if not provided.
+
     Returns (reply_text, usage, headers).
     """
+    hist = history if history is not None else conversation_history
+
     system_prompt = (
         "You are a knowledgeable assistant with memory of the full conversation. "
         "You are given a Wikipedia article as extra context. "
@@ -152,7 +170,6 @@ def ask_model_with_context(wiki_title: str, wiki_context: str) -> tuple:
         "with a clear, concise summary. Do not fabricate information beyond what is provided."
     )
 
-    # Inject Wikipedia context as an extra system-level note before the history
     wiki_note = (
         f"[Wikipedia article fetched for this query: '{wiki_title}']\n"
         f"--- CONTEXT START ---\n{wiki_context}\n--- CONTEXT END ---"
@@ -161,7 +178,7 @@ def ask_model_with_context(wiki_title: str, wiki_context: str) -> tuple:
     messages = (
         [{"role": "system", "content": system_prompt}]
         + [{"role": "system", "content": wiki_note}]
-        + conversation_history
+        + hist
     )
 
     raw = client.chat.completions.with_raw_response.create(
@@ -172,7 +189,79 @@ def ask_model_with_context(wiki_title: str, wiki_context: str) -> tuple:
     return response.choices[0].message.content, response.usage, raw.headers
 
 
-# ── Main chatbot loop ─────────────────────────────────────────────────────────
+def stream_model_direct(history: list):
+    """
+    Stream the model response using conversation history.
+    System prompt includes the NEED_WIKI instruction.
+    Yields text chunks.
+    """
+    system_prompt = (
+        "You are a knowledgeable assistant with memory of the full conversation. "
+        "Answer the user's latest question clearly and concisely using your own knowledge. "
+        "You have access to everything said earlier — use it! "
+        "However, if you are NOT confident or the topic is too specific / niche / recent, "
+        "respond with ONLY the word: NEED_WIKI (nothing else). "
+        "Do NOT use NEED_WIKI if you genuinely know the answer."
+    )
+    messages = [{"role": "system", "content": system_prompt}] + history
+    stream = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    last_usage = None
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+        if hasattr(chunk, "usage") and chunk.usage:
+            last_usage = chunk.usage
+    # Return usage via a special attribute on the generator — callers can access
+    # it via the module-level variable set below after iteration.
+    stream_model_direct._last_usage = last_usage
+
+
+def stream_model_with_context(history: list, wiki_title: str, wiki_context: str):
+    """
+    Stream the model response with Wikipedia context injected.
+    Yields text chunks.
+    """
+    system_prompt = (
+        "You are a knowledgeable assistant with memory of the full conversation. "
+        "A Wikipedia article has been fetched as context. "
+        "Use the conversation history AND the Wikipedia context to answer the user's latest question "
+        "with a clear, concise summary. Do not fabricate information beyond what is provided."
+    )
+    wiki_note = (
+        f"[Wikipedia article fetched: '{wiki_title}']\n"
+        f"--- CONTEXT START ---\n{wiki_context}\n--- CONTEXT END ---"
+    )
+    messages = (
+        [{"role": "system", "content": system_prompt}]
+        + [{"role": "system", "content": wiki_note}]
+        + history
+    )
+    stream = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+    last_usage = None
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+        if hasattr(chunk, "usage") and chunk.usage:
+            last_usage = chunk.usage
+    stream_model_with_context._last_usage = last_usage
+
+
+def build_history_for_model(messages: list) -> list:
+    """Convert session messages (which may have extra keys) to role/content list."""
+    return [{"role": m["role"], "content": m["content"]} for m in messages]
+
+
+# ── Main chatbot loop (console) ───────────────────────────────────────────────
 
 def start_chatbot():
     print("🤖 Smart Chatbot with Memory  (Big Pickle + Wikipedia fallback)")
