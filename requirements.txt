@@ -1,22 +1,22 @@
 # ── LangChain ─────────────────────────────────────────────────────────────────
 # Used by: local_wiki_chatbot.py, wiki_chatbot_memory.py (WikipediaRetriever)
-langchain
-langchain-community
-langchain-core
-langchain-text-splitters
+langchain==1.2.10
+langchain-community==0.4.1
+langchain-core==1.2.15
+langchain-text-splitters==1.1.1
 
 # ── Ollama ─────────────────────────────────────────────────────────────────────
 # Used by: local_wiki_chatbot.py, local_wiki_streamlit.py
-ollama
+ollama==0.6.1
 
 # ── OpenAI-compatible client ───────────────────────────────────────────────────
 # Used by: opencode_chatbot.py, wiki_chatbot.py, wiki_chatbot_memory.py
-openai
+openai==2.21.0
 
 # ── Environment variables ──────────────────────────────────────────────────────
 # Used by: opencode_chatbot.py, wiki_chatbot.py, wiki_chatbot_memory.py
-python-dotenv
+python-dotenv==1.2.1
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 # Used by: local_wiki_streamlit.py, wiki_chatbot_memory_streamlit.py
-streamlit
+streamlit==1.54.0
