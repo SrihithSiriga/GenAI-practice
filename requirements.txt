@@ -5,10 +5,6 @@ langchain-community
 langchain-core
 langchain-text-splitters
 
-# ── Wikipedia (plain package) ──────────────────────────────────────────────────
-# Used by: wiki_chatbot.py (not yet migrated to WikipediaRetriever)
-wikipedia
-
 # ── Ollama ─────────────────────────────────────────────────────────────────────
 # Used by: local_wiki_chatbot.py, local_wiki_streamlit.py
 ollama
