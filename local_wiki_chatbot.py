@@ -1,6 +1,6 @@
 import re
-import wikipedia
 import ollama
+from langchain_community.retrievers import WikipediaRetriever
 
 # ── Model config ──────────────────────────────────────────────────────────────
 MODEL_NAME       = "qwen2.5:3b"
@@ -38,30 +38,18 @@ def clean_query(query: str) -> str:
 
 def search_wikipedia(query: str, sentences: int = 10):
     """
-    Search Wikipedia for the given query.
+    Search Wikipedia using LangChain's WikipediaRetriever.
     Returns (title, summary) or (None, error_message).
     """
     try:
         search_term = clean_query(query)
-        results = wikipedia.search(search_term, results=3)
-        if not results:
+        retriever = WikipediaRetriever(top_k_results=1, doc_content_chars_max=sentences * 500)
+        docs = retriever.invoke(search_term)
+        if not docs:
             return None, "No Wikipedia results found for your query."
-
-        page    = wikipedia.page(results[0], auto_suggest=False)
-        summary = wikipedia.summary(results[0], sentences=sentences, auto_suggest=False)
-        return page.title, summary
-
-    except wikipedia.exceptions.DisambiguationError as e:
-        try:
-            page    = wikipedia.page(e.options[0], auto_suggest=False)
-            summary = wikipedia.summary(e.options[0], sentences=sentences, auto_suggest=False)
-            return page.title, summary
-        except Exception:
-            return None, f"Topic is ambiguous. Options: {', '.join(e.options[:5])}"
-
-    except wikipedia.exceptions.PageError:
-        return None, f"No Wikipedia page found for '{query}'."
-
+        title   = docs[0].metadata.get("title", "Wikipedia")
+        summary = docs[0].page_content
+        return title, summary
     except Exception as ex:
         return None, f"Wikipedia search error: {ex}"
 
